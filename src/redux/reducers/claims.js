@@ -107,6 +107,7 @@ function handleClaimAction(state: State, action: any): State {
       stream: ?StreamClaim,
       channel: ?ChannelClaim,
       claimsInChannel: ?number,
+      collection: ?CollectionClaim,
     },
   } = action.data;
 
@@ -119,7 +120,7 @@ function handleClaimAction(state: State, action: any): State {
 
   Object.entries(resolveInfo).forEach(([url: string, resolveResponse: ResolveResponse]) => {
     // $FlowFixMe
-    const { claimsInChannel, stream, channel } = resolveResponse;
+    const { claimsInChannel, stream, channel, collection } = resolveResponse;
 
     if (stream) {
       if (pendingIds.includes(stream.claim_id)) {
@@ -162,6 +163,10 @@ function handleClaimAction(state: State, action: any): State {
       byUri[channel.canonical_url] = channel.claim_id;
       newResolvingUrls.delete(channel.canonical_url);
       newResolvingUrls.delete(channel.permanent_url);
+    }
+
+    if (collection) {
+
     }
 
     newResolvingUrls.delete(url);

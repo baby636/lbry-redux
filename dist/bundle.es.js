@@ -5,6 +5,7 @@ Object.defineProperty(exports, '__esModule', { value: true });
 require('proxy-polyfill');
 var uuid = require('uuid');
 var reselect = require('reselect');
+var lbryRedux = require('lbry-redux');
 
 const MINIMUM_PUBLISH_BID = 0.00000001;
 
@@ -162,6 +163,17 @@ const TOGGLE_CHECKING_PENDING = 'TOGGLE_CHECKING_PENDING';
 const PURCHASE_LIST_STARTED = 'PURCHASE_LIST_STARTED';
 const PURCHASE_LIST_COMPLETED = 'PURCHASE_LIST_COMPLETED';
 const PURCHASE_LIST_FAILED = 'PURCHASE_LIST_FAILED';
+
+const COLLECTION_CREATE_STARTED = 'COLLECTION_CREATE_STARTED';
+const COLLECTION_CREATE_COMPLETED = 'COLLECTION_CREATE_COMPLETED';
+const COLLECTION_CREATE_FAILED = 'COLLECTION_CREATE_FAILED';
+const COLLECTION_RESOLVE_STARTED = 'COLLECTION_RESOLVE_STARTED';
+const COLLECTION_RESOLVE_COMPLETED = 'COLLECTION_RESOLVE_COMPLETED';
+const COLLECTION_RESOLVE_FAILED = 'COLLECTION_RESOLVE_FAILED';
+const PLAYLIST_CREATE = 'PLAYLIST_CREATE';
+const PLAYLIST_DELETE = 'PLAYLIST_DELETE';
+const PLAYLIST_UPDATE = 'PLAYLIST_UPDATE';
+const PLAYLIST_ERROR = 'PLAYLIST_ERROR';
 
 // Comments
 const COMMENT_LIST_STARTED = 'COMMENT_LIST_STARTED';
@@ -437,6 +449,16 @@ var action_types = /*#__PURE__*/Object.freeze({
   PURCHASE_LIST_STARTED: PURCHASE_LIST_STARTED,
   PURCHASE_LIST_COMPLETED: PURCHASE_LIST_COMPLETED,
   PURCHASE_LIST_FAILED: PURCHASE_LIST_FAILED,
+  COLLECTION_CREATE_STARTED: COLLECTION_CREATE_STARTED,
+  COLLECTION_CREATE_COMPLETED: COLLECTION_CREATE_COMPLETED,
+  COLLECTION_CREATE_FAILED: COLLECTION_CREATE_FAILED,
+  COLLECTION_RESOLVE_STARTED: COLLECTION_RESOLVE_STARTED,
+  COLLECTION_RESOLVE_COMPLETED: COLLECTION_RESOLVE_COMPLETED,
+  COLLECTION_RESOLVE_FAILED: COLLECTION_RESOLVE_FAILED,
+  PLAYLIST_CREATE: PLAYLIST_CREATE,
+  PLAYLIST_DELETE: PLAYLIST_DELETE,
+  PLAYLIST_UPDATE: PLAYLIST_UPDATE,
+  PLAYLIST_ERROR: PLAYLIST_ERROR,
   COMMENT_LIST_STARTED: COMMENT_LIST_STARTED,
   COMMENT_LIST_COMPLETED: COMMENT_LIST_COMPLETED,
   COMMENT_LIST_FAILED: COMMENT_LIST_FAILED,
@@ -1073,6 +1095,7 @@ const Lbry = {
   support_create: params => daemonCallWithResult('support_create', params),
   support_list: params => daemonCallWithResult('support_list', params),
   stream_repost: params => daemonCallWithResult('stream_repost', params),
+  collection_resolve: params => daemonCallWithResult('collection_resolve', params),
 
   // File fetching and manipulation
   file_list: (params = {}) => daemonCallWithResult('file_list', params),
@@ -1919,21 +1942,191 @@ function doDismissError() {
   };
 }
 
-const selectState = state => state.wallet || {};
+//      
 
-const selectWalletState = selectState;
+const selectState = state => state.collections;
 
-const selectWalletIsEncrypted = reselect.createSelector(selectState, state => state.walletIsEncrypted);
+const selectMyPlaylists = reselect.createSelector(selectState, state => state.myListsById);
+const selectResolvedPlaylists = reselect.createSelector(selectState, state => state.resolvedListsById);
 
-const selectWalletEncryptPending = reselect.createSelector(selectState, state => state.walletEncryptPending);
+// how do we deal with both resolvedCollections and localCollections
+const makeSelectPlaylistForId = id => reselect.createSelector(selectMyPlaylists, selectResolvedPlaylists, (myLists, rLists) => {
+  const playlist = myLists[id] || rLists[id];
+  return playlist;
+});
 
-const selectWalletEncryptSucceeded = reselect.createSelector(selectState, state => state.walletEncryptSucceded);
+const makeSelectUrlsForPlaylistId = id => reselect.createSelector(makeSelectPlaylistForId(id), playlist => {
+  const items = playlist.items || [];
+  const urls = items.map(item => item.url);
+  return urls;
+});
 
-const selectPendingSupportTransactions = reselect.createSelector(selectState, state => state.pendingSupportTransactions);
+const makeSelectNameForPlaylistId = id => reselect.createSelector(makeSelectPlaylistForId(id), playlist => {
+  return playlist.name || '';
+});
 
-const selectPendingOtherTransactions = reselect.createSelector(selectState, state => state.pendingTxos);
+function _asyncToGenerator(fn) { return function () { var gen = fn.apply(this, arguments); return new Promise(function (resolve, reject) { function step(key, arg) { try { var info = gen[key](arg); var value = info.value; } catch (error) { reject(error); return; } if (info.done) { resolve(value); } else { return Promise.resolve(value).then(function (value) { step("next", value); }, function (err) { step("throw", err); }); } } return step("next"); }); }; }
 
-const selectAbandonClaimSupportError = reselect.createSelector(selectState, state => state.abandonClaimSupportError);
+const doAddPlaylist = (name, saved) => (dispatch, getState) => {
+  const state = getState();
+
+  return dispatch({
+    type: PLAYLIST_CREATE,
+    data: {
+      saved: saved,
+      entry: {
+        items: [],
+        id: uuid.v4(), // start with a uuid, this becomes a claimId after publish
+        name: name,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        collectionClaimId: null,
+        builtin: false
+      }
+    }
+  });
+};
+
+// lbry://something?pl=<claimId>&index=4
+const doResolveCollection = claimId => (() => {
+  var _ref = _asyncToGenerator(function* (dispatch, getState) {
+    const state = getState();
+
+    dispatch({
+      type: COLLECTION_RESOLVE_STARTED
+    });
+
+    let claim = lbryRedux.makeSelectClaimForClaimId(claimId)(state);
+    if (!claim) {
+      const result = yield lbryRedux.Lbry.claim_search({ claim_id: [claimId] });
+      let error;
+      if (result.message) {
+        error = result.message;
+      } else if (result.items && result.items.length === 0) {
+        error = 'no results';
+      }
+
+      if (error) {
+        return dispatch({
+          type: COLLECTION_RESOLVE_FAILED,
+          data: {
+            message: error
+          }
+        });
+      }
+
+      claim = result.items[0];
+    }
+
+    const { name } = claim;
+
+    const items = [];
+    const collectionResults = yield lbryRedux.Lbry.collection_resolve({ claim_id: claimId });
+    if (collectionResults.message || collectionResults.items && collectionResults.items.length === 0) {
+      return dispatch({
+        type: COLLECTION_RESOLVE_FAILED,
+        data: {
+          message: collectionResults.message || 'no results'
+        }
+      });
+    }
+
+    const collectionClaims = collectionResults.items;
+    collectionClaims.forEach(function (claim) {
+      items.push({
+        url: claim.canonical_url,
+        claimId: claim.claim_id
+      });
+    });
+
+    // resolve or get collection claim for uri
+    // dispatch RESOLVE_COLLECTION_STARTED
+
+    dispatch({
+      type: COLLECTION_RESOLVE_COMPLETED,
+      data: {
+        entry: {
+          items,
+          id: claimId, // start with a uuid, this becomes a claimId after publish
+          name: name, // maybe not
+          builtin: false
+        }
+      }
+    });
+    console.log('items retd', items);
+    return items;
+
+    // dispatch RESOLVE_COLLECTION_COMPLETE // populated resolved collections by uri, by id
+    //
+  });
+
+  return function (_x, _x2) {
+    return _ref.apply(this, arguments);
+  };
+})();
+
+const doUpdatePlaylist = (id, params) => (dispatch, getState) => {
+  const state = getState();
+  const playlist = makeSelectPlaylistForId(id)(state);
+
+  const generatePlaylistItem = claim => {
+    if (claim && claim.canonical_url) {
+      const item = {};
+      item.url = claim.canonical_url;
+      item.claimId = claim.claim_id;
+      item.addedAt = Date.now();
+      return item;
+    }
+  };
+
+  if (!playlist) {
+    return dispatch({
+      type: PLAYLIST_ERROR,
+      data: {
+        message: 'playlist does not exist'
+      }
+    });
+  }
+
+  const items = playlist.items;
+  if (params.claims) {
+    params.claims.forEach(claim => items.push(generatePlaylistItem(claim)));
+  }
+  console.log('items', items);
+
+  // add addedat date
+  dispatch({
+    type: PLAYLIST_UPDATE,
+    data: {
+      id: id,
+      playlist: {
+        items: items,
+        id: id,
+        name: params.name || playlist.name,
+        createdAt: playlist.createdAt,
+        updatedAt: Date.now(),
+        collectionClaimId: playlist.collectionClaimId,
+        builtin: playlist.builtin
+      }
+    }
+  });
+};
+
+const selectState$1 = state => state.wallet || {};
+
+const selectWalletState = selectState$1;
+
+const selectWalletIsEncrypted = reselect.createSelector(selectState$1, state => state.walletIsEncrypted);
+
+const selectWalletEncryptPending = reselect.createSelector(selectState$1, state => state.walletEncryptPending);
+
+const selectWalletEncryptSucceeded = reselect.createSelector(selectState$1, state => state.walletEncryptSucceded);
+
+const selectPendingSupportTransactions = reselect.createSelector(selectState$1, state => state.pendingSupportTransactions);
+
+const selectPendingOtherTransactions = reselect.createSelector(selectState$1, state => state.pendingTxos);
+
+const selectAbandonClaimSupportError = reselect.createSelector(selectState$1, state => state.abandonClaimSupportError);
 
 const makeSelectPendingAmountByUri = uri => reselect.createSelector(selectClaimIdsByUri, selectPendingSupportTransactions, (claimIdsByUri, pendingSupports) => {
   const uriEntry = Object.entries(claimIdsByUri).find(([u, cid]) => u === uri);
@@ -1942,41 +2135,41 @@ const makeSelectPendingAmountByUri = uri => reselect.createSelector(selectClaimI
   return pendingSupport ? pendingSupport.effective : undefined;
 });
 
-const selectWalletEncryptResult = reselect.createSelector(selectState, state => state.walletEncryptResult);
+const selectWalletEncryptResult = reselect.createSelector(selectState$1, state => state.walletEncryptResult);
 
-const selectWalletDecryptPending = reselect.createSelector(selectState, state => state.walletDecryptPending);
+const selectWalletDecryptPending = reselect.createSelector(selectState$1, state => state.walletDecryptPending);
 
-const selectWalletDecryptSucceeded = reselect.createSelector(selectState, state => state.walletDecryptSucceded);
+const selectWalletDecryptSucceeded = reselect.createSelector(selectState$1, state => state.walletDecryptSucceded);
 
-const selectWalletDecryptResult = reselect.createSelector(selectState, state => state.walletDecryptResult);
+const selectWalletDecryptResult = reselect.createSelector(selectState$1, state => state.walletDecryptResult);
 
-const selectWalletUnlockPending = reselect.createSelector(selectState, state => state.walletUnlockPending);
+const selectWalletUnlockPending = reselect.createSelector(selectState$1, state => state.walletUnlockPending);
 
-const selectWalletUnlockSucceeded = reselect.createSelector(selectState, state => state.walletUnlockSucceded);
+const selectWalletUnlockSucceeded = reselect.createSelector(selectState$1, state => state.walletUnlockSucceded);
 
-const selectWalletUnlockResult = reselect.createSelector(selectState, state => state.walletUnlockResult);
+const selectWalletUnlockResult = reselect.createSelector(selectState$1, state => state.walletUnlockResult);
 
-const selectWalletLockPending = reselect.createSelector(selectState, state => state.walletLockPending);
+const selectWalletLockPending = reselect.createSelector(selectState$1, state => state.walletLockPending);
 
-const selectWalletLockSucceeded = reselect.createSelector(selectState, state => state.walletLockSucceded);
+const selectWalletLockSucceeded = reselect.createSelector(selectState$1, state => state.walletLockSucceded);
 
-const selectWalletLockResult = reselect.createSelector(selectState, state => state.walletLockResult);
+const selectWalletLockResult = reselect.createSelector(selectState$1, state => state.walletLockResult);
 
-const selectBalance = reselect.createSelector(selectState, state => state.balance);
+const selectBalance = reselect.createSelector(selectState$1, state => state.balance);
 
-const selectTotalBalance = reselect.createSelector(selectState, state => state.totalBalance);
+const selectTotalBalance = reselect.createSelector(selectState$1, state => state.totalBalance);
 
-const selectReservedBalance = reselect.createSelector(selectState, state => state.reservedBalance);
+const selectReservedBalance = reselect.createSelector(selectState$1, state => state.reservedBalance);
 
-const selectClaimsBalance = reselect.createSelector(selectState, state => state.claimsBalance);
+const selectClaimsBalance = reselect.createSelector(selectState$1, state => state.claimsBalance);
 
-const selectSupportsBalance = reselect.createSelector(selectState, state => state.supportsBalance);
+const selectSupportsBalance = reselect.createSelector(selectState$1, state => state.supportsBalance);
 
-const selectTipsBalance = reselect.createSelector(selectState, state => state.tipsBalance);
+const selectTipsBalance = reselect.createSelector(selectState$1, state => state.tipsBalance);
 
-const selectTransactionsById = reselect.createSelector(selectState, state => state.transactions || {});
+const selectTransactionsById = reselect.createSelector(selectState$1, state => state.transactions || {});
 
-const selectSupportsByOutpoint = reselect.createSelector(selectState, state => state.supports || {});
+const selectSupportsByOutpoint = reselect.createSelector(selectState$1, state => state.supports || {});
 
 const selectTotalSupports = reselect.createSelector(selectSupportsByOutpoint, byOutpoint => {
   let total = parseFloat('0.0');
@@ -2068,15 +2261,15 @@ const selectRecentTransactions = reselect.createSelector(selectTransactionItems,
 
 const selectHasTransactions = reselect.createSelector(selectTransactionItems, transactions => transactions && transactions.length > 0);
 
-const selectIsFetchingTransactions = reselect.createSelector(selectState, state => state.fetchingTransactions);
+const selectIsFetchingTransactions = reselect.createSelector(selectState$1, state => state.fetchingTransactions);
 
-const selectIsSendingSupport = reselect.createSelector(selectState, state => state.sendingSupport);
+const selectIsSendingSupport = reselect.createSelector(selectState$1, state => state.sendingSupport);
 
-const selectReceiveAddress = reselect.createSelector(selectState, state => state.receiveAddress);
+const selectReceiveAddress = reselect.createSelector(selectState$1, state => state.receiveAddress);
 
-const selectGettingNewAddress = reselect.createSelector(selectState, state => state.gettingNewAddress);
+const selectGettingNewAddress = reselect.createSelector(selectState$1, state => state.gettingNewAddress);
 
-const selectDraftTransaction = reselect.createSelector(selectState, state => state.draftTransaction || {});
+const selectDraftTransaction = reselect.createSelector(selectState$1, state => state.draftTransaction || {});
 
 const selectDraftTransactionAmount = reselect.createSelector(selectDraftTransaction, draft => draft.amount);
 
@@ -2084,11 +2277,11 @@ const selectDraftTransactionAddress = reselect.createSelector(selectDraftTransac
 
 const selectDraftTransactionError = reselect.createSelector(selectDraftTransaction, draft => draft.error);
 
-const selectBlocks = reselect.createSelector(selectState, state => state.blocks);
+const selectBlocks = reselect.createSelector(selectState$1, state => state.blocks);
 
-const selectCurrentHeight = reselect.createSelector(selectState, state => state.latestBlock);
+const selectCurrentHeight = reselect.createSelector(selectState$1, state => state.latestBlock);
 
-const selectTransactionListFilter = reselect.createSelector(selectState, state => state.transactionListFilter || '');
+const selectTransactionListFilter = reselect.createSelector(selectState$1, state => state.transactionListFilter || '');
 
 const selectFilteredTransactions = reselect.createSelector(selectTransactionItems, selectTransactionListFilter, (transactions, filter) => {
   return transactions.filter(transaction => {
@@ -2096,17 +2289,17 @@ const selectFilteredTransactions = reselect.createSelector(selectTransactionItem
   });
 });
 
-const selectTxoPageParams = reselect.createSelector(selectState, state => state.txoFetchParams);
+const selectTxoPageParams = reselect.createSelector(selectState$1, state => state.txoFetchParams);
 
-const selectTxoPage = reselect.createSelector(selectState, state => state.txoPage && state.txoPage.items || []);
+const selectTxoPage = reselect.createSelector(selectState$1, state => state.txoPage && state.txoPage.items || []);
 
-const selectTxoPageNumber = reselect.createSelector(selectState, state => state.txoPage && state.txoPage.page || 1);
+const selectTxoPageNumber = reselect.createSelector(selectState$1, state => state.txoPage && state.txoPage.page || 1);
 
-const selectTxoItemCount = reselect.createSelector(selectState, state => state.txoPage && state.txoPage.total_items || 1);
+const selectTxoItemCount = reselect.createSelector(selectState$1, state => state.txoPage && state.txoPage.total_items || 1);
 
-const selectFetchingTxosError = reselect.createSelector(selectState, state => state.fetchingTxosError);
+const selectFetchingTxosError = reselect.createSelector(selectState$1, state => state.fetchingTxosError);
 
-const selectIsFetchingTxos = reselect.createSelector(selectState, state => state.fetchingTxos);
+const selectIsFetchingTxos = reselect.createSelector(selectState$1, state => state.fetchingTxos);
 
 const makeSelectFilteredTransactionsForPage = (page = 1) => reselect.createSelector(selectFilteredTransactions, filteredTransactions => {
   const start = (Number(page) - 1) * Number(PAGE_SIZE$1);
@@ -2120,19 +2313,19 @@ const makeSelectLatestTransactions = reselect.createSelector(selectTransactionIt
 
 const selectFilteredTransactionCount = reselect.createSelector(selectFilteredTransactions, filteredTransactions => filteredTransactions.length);
 
-const selectIsWalletReconnecting = reselect.createSelector(selectState, state => state.walletReconnecting);
+const selectIsWalletReconnecting = reselect.createSelector(selectState$1, state => state.walletReconnecting);
 
-const selectIsFetchingUtxoCounts = reselect.createSelector(selectState, state => state.fetchingUtxoCounts);
+const selectIsFetchingUtxoCounts = reselect.createSelector(selectState$1, state => state.fetchingUtxoCounts);
 
-const selectIsConsolidatingUtxos = reselect.createSelector(selectState, state => state.consolidatingUtxos);
+const selectIsConsolidatingUtxos = reselect.createSelector(selectState$1, state => state.consolidatingUtxos);
 
-const selectIsMassClaimingTips = reselect.createSelector(selectState, state => state.massClaimingTips);
+const selectIsMassClaimingTips = reselect.createSelector(selectState$1, state => state.massClaimingTips);
 
-const selectPendingConsolidateTxid = reselect.createSelector(selectState, state => state.pendingConsolidateTxid);
+const selectPendingConsolidateTxid = reselect.createSelector(selectState$1, state => state.pendingConsolidateTxid);
 
-const selectPendingMassClaimTxid = reselect.createSelector(selectState, state => state.pendingMassClaimTxid);
+const selectPendingMassClaimTxid = reselect.createSelector(selectState$1, state => state.pendingMassClaimTxid);
 
-const selectUtxoCounts = reselect.createSelector(selectState, state => state.utxoCounts);
+const selectUtxoCounts = reselect.createSelector(selectState$1, state => state.utxoCounts);
 
 var _extends$2 = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
 
@@ -2183,21 +2376,21 @@ function filterClaims(claims, query) {
 
 var _extends$3 = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
 
-const selectState$1 = state => state.claims || {};
+const selectState$2 = state => state.claims || {};
 
-const selectClaimsById = reselect.createSelector(selectState$1, state => state.byId || {});
+const selectClaimsById = reselect.createSelector(selectState$2, state => state.byId || {});
 
-const selectClaimIdsByUri = reselect.createSelector(selectState$1, state => state.claimsByUri || {});
+const selectClaimIdsByUri = reselect.createSelector(selectState$2, state => state.claimsByUri || {});
 
-const selectCurrentChannelPage = reselect.createSelector(selectState$1, state => state.currentChannelPage || 1);
+const selectCurrentChannelPage = reselect.createSelector(selectState$2, state => state.currentChannelPage || 1);
 
-const selectCreatingChannel = reselect.createSelector(selectState$1, state => state.creatingChannel);
+const selectCreatingChannel = reselect.createSelector(selectState$2, state => state.creatingChannel);
 
-const selectCreateChannelError = reselect.createSelector(selectState$1, state => state.createChannelError);
+const selectCreateChannelError = reselect.createSelector(selectState$2, state => state.createChannelError);
 
-const selectRepostLoading = reselect.createSelector(selectState$1, state => state.repostLoading);
+const selectRepostLoading = reselect.createSelector(selectState$2, state => state.repostLoading);
 
-const selectRepostError = reselect.createSelector(selectState$1, state => state.repostError);
+const selectRepostError = reselect.createSelector(selectState$2, state => state.repostError);
 
 const selectClaimsByUri = reselect.createSelector(selectClaimIdsByUri, selectClaimsById, (byUri, byId) => {
   const claims = {};
@@ -2218,9 +2411,9 @@ const selectClaimsByUri = reselect.createSelector(selectClaimIdsByUri, selectCla
   return claims;
 });
 
-const selectAllClaimsByChannel = reselect.createSelector(selectState$1, state => state.paginatedClaimsByChannel || {});
+const selectAllClaimsByChannel = reselect.createSelector(selectState$2, state => state.paginatedClaimsByChannel || {});
 
-const selectPendingIds = reselect.createSelector(selectState$1, state => state.pendingIds || []);
+const selectPendingIds = reselect.createSelector(selectState$2, state => state.pendingIds || []);
 
 const makeSelectClaimIsPending = uri => reselect.createSelector(selectClaimIdsByUri, selectPendingIds, (idsByUri, pendingIds) => {
   const claimId = idsByUri[normalizeURI(uri)];
@@ -2231,7 +2424,9 @@ const makeSelectClaimIsPending = uri => reselect.createSelector(selectClaimIdsBy
   return false;
 });
 
-const selectReflectingById = reselect.createSelector(selectState$1, state => state.reflectingById);
+const selectReflectingById = reselect.createSelector(selectState$2, state => state.reflectingById);
+
+const makeSelectClaimForClaimId = claimId => reselect.createSelector(selectClaimsById, byId => byId[claimId] ? byId[claimId] : undefined);
 
 const makeSelectClaimForUri = (uri, returnRepost = true) => reselect.createSelector(selectClaimIdsByUri, selectClaimsById, (byUri, byId) => {
   let validUri;
@@ -2269,7 +2464,7 @@ const makeSelectClaimForUri = (uri, returnRepost = true) => reselect.createSelec
   }
 });
 
-const selectMyClaimsRaw = reselect.createSelector(selectState$1, selectClaimsById, (state, byId) => {
+const selectMyClaimsRaw = reselect.createSelector(selectState$2, selectClaimsById, (state, byId) => {
   const ids = state.myClaims;
   if (!ids) {
     return ids;
@@ -2285,7 +2480,7 @@ const selectMyClaimsRaw = reselect.createSelector(selectState$1, selectClaimsByI
   return claims;
 });
 
-const selectAbandoningIds = reselect.createSelector(selectState$1, state => Object.keys(state.abandoningById || {}));
+const selectAbandoningIds = reselect.createSelector(selectState$2, state => Object.keys(state.abandoningById || {}));
 
 const makeSelectAbandoningClaimById = claimId => reselect.createSelector(selectAbandoningIds, ids => ids.includes(claimId));
 
@@ -2313,15 +2508,15 @@ const makeSelectClaimIsMine = rawUri => {
   });
 };
 
-const selectMyPurchases = reselect.createSelector(selectState$1, state => state.myPurchases);
+const selectMyPurchases = reselect.createSelector(selectState$2, state => state.myPurchases);
 
-const selectPurchaseUriSuccess = reselect.createSelector(selectState$1, state => state.purchaseUriSuccess);
+const selectPurchaseUriSuccess = reselect.createSelector(selectState$2, state => state.purchaseUriSuccess);
 
-const selectMyPurchasesCount = reselect.createSelector(selectState$1, state => state.myPurchasesPageTotalResults);
+const selectMyPurchasesCount = reselect.createSelector(selectState$2, state => state.myPurchasesPageTotalResults);
 
-const selectIsFetchingMyPurchases = reselect.createSelector(selectState$1, state => state.fetchingMyPurchases);
+const selectIsFetchingMyPurchases = reselect.createSelector(selectState$2, state => state.fetchingMyPurchases);
 
-const selectFetchingMyPurchasesError = reselect.createSelector(selectState$1, state => state.fetchingMyPurchasesError);
+const selectFetchingMyPurchasesError = reselect.createSelector(selectState$2, state => state.fetchingMyPurchasesError);
 
 const makeSelectMyPurchasesForPage = (query, page = 1) => reselect.createSelector(selectMyPurchases, selectClaimsByUri, (myPurchases, claimsByUri) => {
   if (!myPurchases) {
@@ -2344,7 +2539,7 @@ const makeSelectClaimWasPurchased = uri => reselect.createSelector(makeSelectCla
   return claim && claim.purchase_receipt !== undefined;
 });
 
-const selectAllFetchingChannelClaims = reselect.createSelector(selectState$1, state => state.fetchingChannelClaims || {});
+const selectAllFetchingChannelClaims = reselect.createSelector(selectState$2, state => state.fetchingChannelClaims || {});
 
 const makeSelectFetchingChannelClaims = uri => reselect.createSelector(selectAllFetchingChannelClaims, fetching => fetching && fetching[uri]);
 
@@ -2419,15 +2614,15 @@ const makeSelectCoverForUri = uri => reselect.createSelector(makeSelectClaimForU
   return cover && cover.url ? cover.url.trim().replace(/^http:\/\//i, 'https://') : undefined;
 });
 
-const selectIsFetchingClaimListMine = reselect.createSelector(selectState$1, state => state.isFetchingClaimListMine);
+const selectIsFetchingClaimListMine = reselect.createSelector(selectState$2, state => state.isFetchingClaimListMine);
 
-const selectMyClaimsPage = reselect.createSelector(selectState$1, state => state.myClaimsPageResults || []);
+const selectMyClaimsPage = reselect.createSelector(selectState$2, state => state.myClaimsPageResults || []);
 
-const selectMyClaimsPageNumber = reselect.createSelector(selectState$1, state => state.claimListMinePage && state.claimListMinePage.items || [], state => state.txoPage && state.txoPage.page || 1);
+const selectMyClaimsPageNumber = reselect.createSelector(selectState$2, state => state.claimListMinePage && state.claimListMinePage.items || [], state => state.txoPage && state.txoPage.page || 1);
 
-const selectMyClaimsPageItemCount = reselect.createSelector(selectState$1, state => state.myClaimsPageTotalResults || 1);
+const selectMyClaimsPageItemCount = reselect.createSelector(selectState$2, state => state.myClaimsPageTotalResults || 1);
 
-const selectFetchingMyClaimsPageError = reselect.createSelector(selectState$1, state => state.fetchingClaimListMinePageError);
+const selectFetchingMyClaimsPageError = reselect.createSelector(selectState$2, state => state.fetchingClaimListMinePageError);
 
 const selectMyClaims = reselect.createSelector(selectMyActiveClaims, selectClaimsById, selectAbandoningIds, (myClaimIds, byId, abandoningIds) => {
   const claims = [];
@@ -2467,9 +2662,9 @@ const selectMyClaimsOutpoints = reselect.createSelector(selectMyClaims, myClaims
   return outpoints;
 });
 
-const selectFetchingMyChannels = reselect.createSelector(selectState$1, state => state.fetchingMyChannels);
+const selectFetchingMyChannels = reselect.createSelector(selectState$2, state => state.fetchingMyChannels);
 
-const selectMyChannelClaims = reselect.createSelector(selectState$1, selectClaimsById, (state, byId) => {
+const selectMyChannelClaims = reselect.createSelector(selectState$2, selectClaimsById, (state, byId) => {
   const ids = state.myChannelClaims;
   if (!ids) {
     return ids;
@@ -2488,15 +2683,15 @@ const selectMyChannelClaims = reselect.createSelector(selectState$1, selectClaim
 
 const selectMyChannelUrls = reselect.createSelector(selectMyChannelClaims, claims => claims ? claims.map(claim => claim.canonical_url || claim.permanent_url) : undefined);
 
-const selectResolvingUris = reselect.createSelector(selectState$1, state => state.resolvingUris || []);
+const selectResolvingUris = reselect.createSelector(selectState$2, state => state.resolvingUris || []);
 
-const selectChannelImportPending = reselect.createSelector(selectState$1, state => state.pendingChannelImport);
+const selectChannelImportPending = reselect.createSelector(selectState$2, state => state.pendingChannelImport);
 
 const makeSelectIsUriResolving = uri => reselect.createSelector(selectResolvingUris, resolvingUris => resolvingUris && resolvingUris.indexOf(uri) !== -1);
 
-const selectPlayingUri = reselect.createSelector(selectState$1, state => state.playingUri);
+const selectPlayingUri = reselect.createSelector(selectState$2, state => state.playingUri);
 
-const selectChannelClaimCounts = reselect.createSelector(selectState$1, state => state.channelClaimCounts || {});
+const selectChannelClaimCounts = reselect.createSelector(selectState$2, state => state.channelClaimCounts || {});
 
 const makeSelectPendingClaimForUri = uri => reselect.createSelector(selectPendingIds, selectClaimsById, (pending, claims) => {
   let uriIsChannel;
@@ -2605,13 +2800,13 @@ const makeSelectTagsForUri = uri => reselect.createSelector(makeSelectMetadataFo
   return metadata && metadata.tags || [];
 });
 
-const selectFetchingClaimSearchByQuery = reselect.createSelector(selectState$1, state => state.fetchingClaimSearchByQuery || {});
+const selectFetchingClaimSearchByQuery = reselect.createSelector(selectState$2, state => state.fetchingClaimSearchByQuery || {});
 
 const selectFetchingClaimSearch = reselect.createSelector(selectFetchingClaimSearchByQuery, fetchingClaimSearchByQuery => Boolean(Object.keys(fetchingClaimSearchByQuery).length));
 
-const selectClaimSearchByQuery = reselect.createSelector(selectState$1, state => state.claimSearchByQuery || {});
+const selectClaimSearchByQuery = reselect.createSelector(selectState$2, state => state.claimSearchByQuery || {});
 
-const selectClaimSearchByQueryLastPageReached = reselect.createSelector(selectState$1, state => state.claimSearchByQueryLastPageReached || {});
+const selectClaimSearchByQueryLastPageReached = reselect.createSelector(selectState$2, state => state.claimSearchByQueryLastPageReached || {});
 
 const makeSelectShortUrlForUri = uri => reselect.createSelector(makeSelectClaimForUri(uri), claim => claim && claim.short_url);
 
@@ -2636,9 +2831,9 @@ const makeSelectSupportsForUri = uri => reselect.createSelector(selectSupportsBy
   return total;
 });
 
-const selectUpdatingChannel = reselect.createSelector(selectState$1, state => state.updatingChannel);
+const selectUpdatingChannel = reselect.createSelector(selectState$2, state => state.updatingChannel);
 
-const selectUpdateChannelError = reselect.createSelector(selectState$1, state => state.updateChannelError);
+const selectUpdateChannelError = reselect.createSelector(selectState$2, state => state.updateChannelError);
 
 const makeSelectReflectingClaimForUri = uri => reselect.createSelector(selectClaimIdsByUri, selectReflectingById, (claimIdsByUri, reflectingById) => {
   const claimId = claimIdsByUri[normalizeURI(uri)];
@@ -2721,7 +2916,7 @@ function creditsToString(amount) {
 
 var _extends$4 = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
 
-function _asyncToGenerator(fn) { return function () { var gen = fn.apply(this, arguments); return new Promise(function (resolve, reject) { function step(key, arg) { try { var info = gen[key](arg); var value = info.value; } catch (error) { reject(error); return; } if (info.done) { resolve(value); } else { return Promise.resolve(value).then(function (value) { step("next", value); }, function (err) { step("throw", err); }); } } return step("next"); }); }; }
+function _asyncToGenerator$1(fn) { return function () { var gen = fn.apply(this, arguments); return new Promise(function (resolve, reject) { function step(key, arg) { try { var info = gen[key](arg); var value = info.value; } catch (error) { reject(error); return; } if (info.done) { resolve(value); } else { return Promise.resolve(value).then(function (value) { step("next", value); }, function (err) { step("throw", err); }); } } return step("next"); }); }; }
 
 const FIFTEEN_SECONDS = 15000;
 let walletBalancePromise = null;
@@ -2839,7 +3034,7 @@ function doFetchSupports(page = 1, pageSize = 99999) {
 
 function doFetchUtxoCounts() {
   return (() => {
-    var _ref = _asyncToGenerator(function* (dispatch) {
+    var _ref = _asyncToGenerator$1(function* (dispatch) {
       dispatch({
         type: FETCH_UTXO_COUNT_STARTED
       });
@@ -2866,7 +3061,7 @@ function doFetchUtxoCounts() {
 
 function doUtxoConsolidate() {
   return (() => {
-    var _ref2 = _asyncToGenerator(function* (dispatch) {
+    var _ref2 = _asyncToGenerator$1(function* (dispatch) {
       dispatch({
         type: DO_UTXO_CONSOLIDATE_STARTED
       });
@@ -2894,7 +3089,7 @@ function doUtxoConsolidate() {
 
 function doTipClaimMass() {
   return (() => {
-    var _ref3 = _asyncToGenerator(function* (dispatch) {
+    var _ref3 = _asyncToGenerator$1(function* (dispatch) {
       dispatch({
         type: TIP_CLAIM_MASS_STARTED
       });
@@ -3312,13 +3507,11 @@ const doCheckPendingTxs = () => (dispatch, getState) => {
       if (noLongerPendingConsolidate.length) {
         if (noLongerPendingConsolidate.includes(pendingConsTxid)) {
           dispatch(doToast({
-            title: __('Wallet Job'),
             message: __('Your wallet is finished consolidating')
           }));
         }
         if (noLongerPendingConsolidate.includes(pendingMassCLaimTxid)) {
           dispatch(doToast({
-            title: __('Wallet Job'),
             message: __('Your tips have been collected')
           }));
         }
@@ -3349,7 +3542,7 @@ function batchActions(...actions) {
 
 var _extends$5 = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
 
-function _asyncToGenerator$1(fn) { return function () { var gen = fn.apply(this, arguments); return new Promise(function (resolve, reject) { function step(key, arg) { try { var info = gen[key](arg); var value = info.value; } catch (error) { reject(error); return; } if (info.done) { resolve(value); } else { return Promise.resolve(value).then(function (value) { step("next", value); }, function (err) { step("throw", err); }); } } return step("next"); }); }; }
+function _asyncToGenerator$2(fn) { return function () { var gen = fn.apply(this, arguments); return new Promise(function (resolve, reject) { function step(key, arg) { try { var info = gen[key](arg); var value = info.value; } catch (error) { reject(error); return; } if (info.done) { resolve(value); } else { return Promise.resolve(value).then(function (value) { step("next", value); }, function (err) { step("throw", err); }); } } return step("next"); }); }; }
 
 function doResolveUris(uris, returnCachedClaims = false, resolveReposts = true) {
   return (dispatch, getState) => {
@@ -3359,6 +3552,7 @@ function doResolveUris(uris, returnCachedClaims = false, resolveReposts = true) 
     const resolvingUris = selectResolvingUris(state);
     const claimsByUri = selectClaimsByUri(state);
     const urisToResolve = normalizedUris.filter(uri => {
+
       if (resolvingUris.includes(uri)) {
         return false;
       }
@@ -3385,7 +3579,7 @@ function doResolveUris(uris, returnCachedClaims = false, resolveReposts = true) 
     const resolveInfo = {};
 
     return lbryProxy.resolve(_extends$5({ urls: urisToResolve }, options)).then((() => {
-      var _ref = _asyncToGenerator$1(function* (result) {
+      var _ref = _asyncToGenerator$2(function* (result) {
         let repostedResults = {};
         const repostsToResolve = [];
         const fallbackResolveInfo = {
@@ -3416,6 +3610,8 @@ function doResolveUris(uris, returnCachedClaims = false, resolveReposts = true) 
                   result.channel = uriResolveInfo;
                   // $FlowFixMe
                   result.claimsInChannel = uriResolveInfo.meta.claims_in_channel;
+                } else if (uriResolveInfo.value_type === 'collection') {
+                  result.collection = uriResolveInfo;
                 } else {
                   result.stream = uriResolveInfo;
                   if (uriResolveInfo.signing_channel) {
@@ -4028,11 +4224,11 @@ const doCheckPendingClaims = onConfirmed => (dispatch, getState) => {
   }, 30000);
 };
 
-const selectState$2 = state => state.fileInfo || {};
+const selectState$3 = state => state.fileInfo || {};
 
-const selectFileInfosByOutpoint = reselect.createSelector(selectState$2, state => state.byOutpoint || {});
+const selectFileInfosByOutpoint = reselect.createSelector(selectState$3, state => state.byOutpoint || {});
 
-const selectIsFetchingFileList = reselect.createSelector(selectState$2, state => state.isFetchingFileList);
+const selectIsFetchingFileList = reselect.createSelector(selectState$3, state => state.isFetchingFileList);
 
 const selectIsFetchingFileListDownloadedOrPublished = reselect.createSelector(selectIsFetchingFileList, selectIsFetchingClaimListMine, (isFetchingFileList, isFetchingClaimListMine) => isFetchingFileList || isFetchingClaimListMine);
 
@@ -4042,14 +4238,14 @@ const makeSelectFileInfoForUri = uri => reselect.createSelector(selectClaimsByUr
   return outpoint ? byOutpoint[outpoint] : undefined;
 });
 
-const selectDownloadingByOutpoint = reselect.createSelector(selectState$2, state => state.downloadingByOutpoint || {});
+const selectDownloadingByOutpoint = reselect.createSelector(selectState$3, state => state.downloadingByOutpoint || {});
 
 const makeSelectDownloadingForUri = uri => reselect.createSelector(selectDownloadingByOutpoint, makeSelectFileInfoForUri(uri), (byOutpoint, fileInfo) => {
   if (!fileInfo) return false;
   return byOutpoint[fileInfo.outpoint];
 });
 
-const selectUrisLoading = reselect.createSelector(selectState$2, state => state.fetching || {});
+const selectUrisLoading = reselect.createSelector(selectState$3, state => state.fetching || {});
 
 const makeSelectLoadingForUri = uri => reselect.createSelector(selectUrisLoading, makeSelectClaimForUri(uri), (fetchingByOutpoint, claim) => {
   if (!claim) {
@@ -4103,9 +4299,9 @@ const selectTotalDownloadProgress = reselect.createSelector(selectDownloadingFil
   return -1;
 });
 
-const selectFileListPublishedSort = reselect.createSelector(selectState$2, state => state.fileListPublishedSort);
+const selectFileListPublishedSort = reselect.createSelector(selectState$3, state => state.fileListPublishedSort);
 
-const selectFileListDownloadedSort = reselect.createSelector(selectState$2, state => state.fileListDownloadedSort);
+const selectFileListDownloadedSort = reselect.createSelector(selectState$3, state => state.fileListDownloadedSort);
 
 const selectDownloadedUris = reselect.createSelector(selectFileInfosDownloaded,
 // We should use permament_url but it doesn't exist in file_list
@@ -4358,10 +4554,10 @@ var _extends$6 = Object.assign || function (target) { for (var i = 1; i < argume
 
 function _objectWithoutProperties$2(obj, keys) { var target = {}; for (var i in obj) { if (keys.indexOf(i) >= 0) continue; if (!Object.prototype.hasOwnProperty.call(obj, i)) continue; target[i] = obj[i]; } return target; }
 
-const selectState$3 = state => state.publish || {};
+const selectState$4 = state => state.publish || {};
 
 // Is the current uri the same as the uri they clicked "edit" on
-const selectIsStillEditing = reselect.createSelector(selectState$3, publishState => {
+const selectIsStillEditing = reselect.createSelector(selectState$4, publishState => {
   const { editingURI, uri } = publishState;
 
   if (!editingURI || !uri) {
@@ -4386,7 +4582,7 @@ const selectIsStillEditing = reselect.createSelector(selectState$3, publishState
   return currentName === editName;
 });
 
-const selectPublishFormValues = reselect.createSelector(selectState$3, state => state.settings, selectIsStillEditing, (publishState, settingsState, isStillEditing) => {
+const selectPublishFormValues = reselect.createSelector(selectState$4, state => state.settings, selectIsStillEditing, (publishState, settingsState, isStillEditing) => {
   const { pendingPublish, language } = publishState,
         formValues = _objectWithoutProperties$2(publishState, ['pendingPublish', 'language']);
   const { clientSettings } = settingsState;
@@ -4402,7 +4598,7 @@ const selectPublishFormValues = reselect.createSelector(selectState$3, state => 
 
   return _extends$6({}, formValues, { language: actualLanguage });
 });
-const makeSelectPublishFormValue = item => reselect.createSelector(selectState$3, state => state[item]);
+const makeSelectPublishFormValue = item => reselect.createSelector(selectState$4, state => state[item]);
 
 const selectMyClaimForUri = reselect.createSelector(selectPublishFormValues, selectIsStillEditing, selectClaimsById, selectMyClaimsWithoutChannels, ({ editingURI, uri }, isStillEditing, claimsById, myClaims) => {
   const { channelName: contentName, streamName: claimName } = parseURI(uri);
@@ -4415,7 +4611,7 @@ const selectMyClaimForUri = reselect.createSelector(selectPublishFormValues, sel
   return isStillEditing ? claimsById[editClaimId] : myClaims.find(claim => !contentName ? claim.name === claimName : claim.name === contentName || claim.name === claimName);
 });
 
-const selectIsResolvingPublishUris = reselect.createSelector(selectState$3, selectResolvingUris, ({ uri, name }, resolvingUris) => {
+const selectIsResolvingPublishUris = reselect.createSelector(selectState$4, selectResolvingUris, ({ uri, name }, resolvingUris) => {
   if (uri) {
     const isResolvingUri = resolvingUris.includes(uri);
     const { isChannel } = parseURI(uri);
@@ -4432,7 +4628,7 @@ const selectIsResolvingPublishUris = reselect.createSelector(selectState$3, sele
   return false;
 });
 
-const selectTakeOverAmount = reselect.createSelector(selectState$3, selectMyClaimForUri, selectClaimsByUri, ({ name }, myClaimForUri, claimsByUri) => {
+const selectTakeOverAmount = reselect.createSelector(selectState$4, selectMyClaimForUri, selectClaimsByUri, ({ name }, myClaimForUri, claimsByUri) => {
   if (!name) {
     return null;
   }
@@ -4457,7 +4653,7 @@ const selectTakeOverAmount = reselect.createSelector(selectState$3, selectMyClai
 
 var _extends$7 = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
 
-function _asyncToGenerator$2(fn) { return function () { var gen = fn.apply(this, arguments); return new Promise(function (resolve, reject) { function step(key, arg) { try { var info = gen[key](arg); var value = info.value; } catch (error) { reject(error); return; } if (info.done) { resolve(value); } else { return Promise.resolve(value).then(function (value) { step("next", value); }, function (err) { step("throw", err); }); } } return step("next"); }); }; }
+function _asyncToGenerator$3(fn) { return function () { var gen = fn.apply(this, arguments); return new Promise(function (resolve, reject) { function step(key, arg) { try { var info = gen[key](arg); var value = info.value; } catch (error) { reject(error); return; } if (info.done) { resolve(value); } else { return Promise.resolve(value).then(function (value) { step("next", value); }, function (err) { step("throw", err); }); } } return step("next"); }); }; }
 
 const doResetThumbnailStatus = () => dispatch => {
   dispatch({
@@ -4820,7 +5016,7 @@ const doCheckReflectingFiles = () => (dispatch, getState) => {
   let reflectorCheckInterval;
 
   const checkFileList = (() => {
-    var _ref = _asyncToGenerator$2(function* () {
+    var _ref = _asyncToGenerator$3(function* () {
       const state = getState();
       const reflectingById = selectReflectingById(state);
       const ids = Object.keys(reflectingById);
@@ -5000,7 +5196,7 @@ function handleClaimAction(state, action) {
 
   Object.entries(resolveInfo).forEach(([url, resolveResponse]) => {
     // $FlowFixMe
-    const { claimsInChannel, stream, channel } = resolveResponse;
+    const { claimsInChannel, stream, channel, collection } = resolveResponse;
 
     if (stream) {
       if (pendingIds.includes(stream.claim_id)) {
@@ -6398,11 +6594,129 @@ const walletReducer = handleActions({
   })
 }, defaultState$5);
 
+var _extends$e = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
+
+// find some way to store resolved pl={url} collection playlists that are not saved
+// find some way to copy url collection playlists to saved/sidebar playlists
+
+// I need a place for my published lists
+// I need a place for my unpublished lists (watch later, etc)
+// I need a place for resolved lists
+const defaultState$6 = {
+  myListsById: {
+    watchlater: {
+      items: [{ url: 'lbry://@seriously#5/seriouspublish#c' }],
+      id: 'watchlater',
+      name: 'Watch Later',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      collectionClaimId: null,
+      builtin: true
+    },
+    favorites: {
+      items: [{ url: 'lbry://@seriously#5/seriouspublish#c' }, { url: 'lbry://@JIGGYTOM#4/niece#a' }, { url: 'lbry://@Karmakut#7/my-new-favorite-vehicle-in-squad-ft#4' }],
+      id: 'favorites',
+      name: 'Favorites',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      collectionClaimId: null,
+      builtin: true
+    }
+  },
+  resolvedListsById: {},
+  error: null
+};
+
+const collectionsReducer = handleActions({
+  [PLAYLIST_CREATE]: (state, action) => {
+    const { saved, entry: params } = action.data; // { id:, items: Array<any>}
+    const newListTemplate = {
+      id: params.id,
+      name: params.name,
+      items: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      collectionClaimId: null,
+      builtin: false
+    };
+
+    const newList = Object.assign({}, newListTemplate, _extends$e({}, params));
+    const { myListsById: lists } = state;
+    const newLists = Object.assign({}, lists, { [params.id]: newList });
+
+    return _extends$e({}, state, {
+      myListsById: newLists
+    });
+  },
+
+  [PLAYLIST_DELETE]: (state, action) => {
+    const { myListsById: lists } = state;
+    const { name } = action.data;
+    if (lists && lists[name] && lists[name].userList) {
+      delete lists[name];
+    }
+    return Object.assign({}, state, {
+      lists
+    });
+  },
+
+  [PLAYLIST_UPDATE]: (state, action) => {
+    const { myListsById: lists } = state;
+    const newLists = Object.assign({}, lists);
+
+    const { id, playlist } = action.data;
+    newLists[id] = playlist;
+    newLists[id]['updatedAt'] = Date.now();
+
+    return _extends$e({}, state, {
+      myListsById: newLists
+    });
+  },
+  [PLAYLIST_ERROR]: (state, action) => {
+
+    return Object.assign({}, state, {
+      error: action.data.message
+    });
+  },
+  [COLLECTION_RESOLVE_STARTED]: state => {
+    return Object.assign({}, state, _extends$e({}, state, {
+      error: '',
+      isResolvingCollection: true
+    }));
+  },
+  [COLLECTION_RESOLVE_COMPLETED]: (state, action) => {
+    const { entry: params } = action.data;
+
+    const newList = {
+      id: params.id,
+      name: params.name,
+      items: params.items,
+      createdAt: params.createdAt,
+      updatedAt: params.updatedAt,
+      builtin: false
+    };
+
+    const { resolvedListsById: lists } = state;
+    const newLists = Object.assign({}, lists, { [params.id]: newList });
+
+    return Object.assign({}, state, _extends$e({}, state, {
+      resolvedListsById: newLists,
+      isResolvingCollection: false
+    }));
+  },
+  [COLLECTION_RESOLVE_FAILED]: (state, action) => {
+    return Object.assign({}, state, _extends$e({}, state, {
+      isResolvingCollection: false,
+      error: action.data.message
+    }));
+  }
+}, defaultState$6);
+
 //      
 
-const selectState$4 = state => state.content || {};
+const selectState$5 = state => state.content || {};
 
-const makeSelectContentPositionForUri = uri => reselect.createSelector(selectState$4, makeSelectClaimForUri(uri), (state, claim) => {
+const makeSelectContentPositionForUri = uri => reselect.createSelector(selectState$5, makeSelectClaimForUri(uri), (state, claim) => {
   if (!claim) {
     return null;
   }
@@ -6411,14 +6725,14 @@ const makeSelectContentPositionForUri = uri => reselect.createSelector(selectSta
   return state.positions[id] ? state.positions[id][outpoint] : null;
 });
 
-var _extends$e = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
+var _extends$f = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
 
-const selectState$5 = state => state.notifications || {};
+const selectState$6 = state => state.notifications || {};
 
-const selectToast = reselect.createSelector(selectState$5, state => {
+const selectToast = reselect.createSelector(selectState$6, state => {
   if (state.toasts.length) {
     const { id, params } = state.toasts[0];
-    return _extends$e({
+    return _extends$f({
       id
     }, params);
   }
@@ -6426,7 +6740,7 @@ const selectToast = reselect.createSelector(selectState$5, state => {
   return null;
 });
 
-const selectError = reselect.createSelector(selectState$5, state => {
+const selectError = reselect.createSelector(selectState$6, state => {
   if (state.errors.length) {
     const { error } = state.errors[0];
     return {
@@ -6461,12 +6775,14 @@ exports.batchActions = batchActions;
 exports.buildSharedStateMiddleware = buildSharedStateMiddleware;
 exports.buildURI = buildURI;
 exports.claimsReducer = claimsReducer;
+exports.collectionsReducer = collectionsReducer;
 exports.contentReducer = contentReducer;
 exports.convertToShareLink = convertToShareLink;
 exports.createNormalizedClaimSearchKey = createNormalizedClaimSearchKey;
 exports.creditsToString = creditsToString;
 exports.doAbandonClaim = doAbandonClaim;
 exports.doAbandonTxo = doAbandonTxo;
+exports.doAddPlaylist = doAddPlaylist;
 exports.doBalanceSubscribe = doBalanceSubscribe;
 exports.doCheckAddressIsMine = doCheckAddressIsMine;
 exports.doCheckPendingClaims = doCheckPendingClaims;
@@ -6503,6 +6819,7 @@ exports.doPurchaseList = doPurchaseList;
 exports.doPurchaseUri = doPurchaseUri;
 exports.doRepost = doRepost;
 exports.doResetThumbnailStatus = doResetThumbnailStatus;
+exports.doResolveCollection = doResolveCollection;
 exports.doResolveUri = doResolveUri;
 exports.doResolveUris = doResolveUris;
 exports.doSendDraftTransaction = doSendDraftTransaction;
@@ -6517,6 +6834,7 @@ exports.doToast = doToast;
 exports.doUpdateBalance = doUpdateBalance;
 exports.doUpdateBlockHeight = doUpdateBlockHeight;
 exports.doUpdateChannel = doUpdateChannel;
+exports.doUpdatePlaylist = doUpdatePlaylist;
 exports.doUpdatePublishForm = doUpdatePublishForm;
 exports.doUpdateTxoPageParams = doUpdateTxoPageParams;
 exports.doUploadThumbnail = doUploadThumbnail;
@@ -6538,6 +6856,7 @@ exports.makeSelectAmountForUri = makeSelectAmountForUri;
 exports.makeSelectCanonicalUrlForUri = makeSelectCanonicalUrlForUri;
 exports.makeSelectChannelForClaimUri = makeSelectChannelForClaimUri;
 exports.makeSelectChannelPermUrlForClaimUri = makeSelectChannelPermUrlForClaimUri;
+exports.makeSelectClaimForClaimId = makeSelectClaimForClaimId;
 exports.makeSelectClaimForUri = makeSelectClaimForUri;
 exports.makeSelectClaimIsMine = makeSelectClaimIsMine;
 exports.makeSelectClaimIsNsfw = makeSelectClaimIsNsfw;
@@ -6567,12 +6886,14 @@ exports.makeSelectMetadataItemForUri = makeSelectMetadataItemForUri;
 exports.makeSelectMyChannelPermUrlForName = makeSelectMyChannelPermUrlForName;
 exports.makeSelectMyPurchasesForPage = makeSelectMyPurchasesForPage;
 exports.makeSelectMyStreamUrlsForPage = makeSelectMyStreamUrlsForPage;
+exports.makeSelectNameForPlaylistId = makeSelectNameForPlaylistId;
 exports.makeSelectNsfwCountForChannel = makeSelectNsfwCountForChannel;
 exports.makeSelectNsfwCountFromUris = makeSelectNsfwCountFromUris;
 exports.makeSelectOmittedCountForChannel = makeSelectOmittedCountForChannel;
 exports.makeSelectPendingAmountByUri = makeSelectPendingAmountByUri;
 exports.makeSelectPendingClaimForUri = makeSelectPendingClaimForUri;
 exports.makeSelectPermanentUrlForUri = makeSelectPermanentUrlForUri;
+exports.makeSelectPlaylistForId = makeSelectPlaylistForId;
 exports.makeSelectPublishFormValue = makeSelectPublishFormValue;
 exports.makeSelectReflectingClaimForUri = makeSelectReflectingClaimForUri;
 exports.makeSelectSearchDownloadUrlsCount = makeSelectSearchDownloadUrlsCount;
@@ -6589,6 +6910,7 @@ exports.makeSelectTotalItemsForChannel = makeSelectTotalItemsForChannel;
 exports.makeSelectTotalPagesForChannel = makeSelectTotalPagesForChannel;
 exports.makeSelectTotalPagesInChannelSearch = makeSelectTotalPagesInChannelSearch;
 exports.makeSelectUriIsStreamable = makeSelectUriIsStreamable;
+exports.makeSelectUrlsForPlaylistId = makeSelectUrlsForPlaylistId;
 exports.normalizeURI = normalizeURI;
 exports.notificationsReducer = notificationsReducer;
 exports.parseQueryParams = parseQueryParams;
@@ -6663,6 +6985,7 @@ exports.selectMyClaimsPageItemCount = selectMyClaimsPageItemCount;
 exports.selectMyClaimsPageNumber = selectMyClaimsPageNumber;
 exports.selectMyClaimsRaw = selectMyClaimsRaw;
 exports.selectMyClaimsWithoutChannels = selectMyClaimsWithoutChannels;
+exports.selectMyPlaylists = selectMyPlaylists;
 exports.selectMyPurchases = selectMyPurchases;
 exports.selectMyPurchasesCount = selectMyPurchasesCount;
 exports.selectMyStreamUrlsCount = selectMyStreamUrlsCount;
@@ -6680,6 +7003,7 @@ exports.selectReflectingById = selectReflectingById;
 exports.selectRepostError = selectRepostError;
 exports.selectRepostLoading = selectRepostLoading;
 exports.selectReservedBalance = selectReservedBalance;
+exports.selectResolvedPlaylists = selectResolvedPlaylists;
 exports.selectResolvingUris = selectResolvingUris;
 exports.selectSupportsBalance = selectSupportsBalance;
 exports.selectSupportsByOutpoint = selectSupportsByOutpoint;
