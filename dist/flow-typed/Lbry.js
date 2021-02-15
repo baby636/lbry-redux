@@ -202,8 +202,8 @@ declare type CollectionResolveOptions = {
 
 declare type CollectionListOptions = {
   page: number,
-  pageSize: number,
-  resolve: boolean,
+  page_size: number,
+  resolve?: boolean,
 };
 
 declare type FileListResponse = {
@@ -326,6 +326,7 @@ declare type LbryTypes = {
   collection_resolve: (params: CollectionResolveOptions) => Promise<CollectionResolveResponse>,
   collection_list: (params: CollectionListOptions) => Promise<CollectionListResponse>,
   collection_create: (params: {}) => Promise<CollectionCreateResponse>,
+  collection_update: (params: {}) => Promise<CollectionCreateResponse>,
 
   // File fetching and manipulation
   file_list: (params: {}) => Promise<FileListResponse>,

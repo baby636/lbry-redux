@@ -1102,7 +1102,8 @@ const Lbry = {
   stream_repost: params => daemonCallWithResult('stream_repost', params),
   collection_resolve: params => daemonCallWithResult('collection_resolve', params),
   collection_list: params => daemonCallWithResult('collection_list', params),
-  collection_crate: params => daemonCallWithResult('collection_create', params),
+  collection_create: params => daemonCallWithResult('collection_create', params),
+  collection_update: params => daemonCallWithResult('collection_create', params),
 
   // File fetching and manipulation
   file_list: (params = {}) => daemonCallWithResult('file_list', params),
@@ -2703,9 +2704,9 @@ const makeSelectTagInClaimOrChannelForUri = (uri, tag) => reselect.createSelecto
 const selectState$2 = state => state.collections;
 
 const selectSavedCollectionIds = reselect.createSelector(selectState$2, collectionState => collectionState.saved);
-const selectBuiltinPlaylists = reselect.createSelector(selectState$2, state => state.builtin); // playlists
-const selectResolvedPlaylists = reselect.createSelector(selectState$2, state => state.resolved); // collections
-const selectMyUnpublishedPlaylists = reselect.createSelector(selectState$2, state => state.unpublished); // collections
+const selectBuiltinPlaylists = reselect.createSelector(selectState$2, state => state.builtin);
+const selectResolvedPlaylists = reselect.createSelector(selectState$2, state => state.resolved);
+const selectMyUnpublishedPlaylists = reselect.createSelector(selectState$2, state => state.unpublished);
 const selectMyPublishedPlaylists = reselect.createSelector(selectResolvedPlaylists, selectMyCollectionIds, (resolved, myIds) => {
   const myPublishedPlaylists = Object.fromEntries(Object.entries(resolved).filter(([key, val]) => myIds.includes(key)));
   return myPublishedPlaylists;
@@ -2720,7 +2721,6 @@ const makeSelectIsResolvingCollectionForId = id => reselect.createSelector(selec
   return state.isResolvingCollectionById.includes(id);
 });
 
-// how do we deal with both resolvedCollections and localCollections
 const makeSelectPlaylistForId = id => reselect.createSelector(selectBuiltinPlaylists, selectResolvedPlaylists, selectMyUnpublishedPlaylists, (bLists, rLists, uLists) => {
   // probably return the most updated when both unpublished and published have same id, maybe mark as unsaved
   const playlist = bLists[id] || rLists[id] || uLists[id];
@@ -3434,7 +3434,6 @@ function doResolveUris(uris, returnCachedClaims = false, resolveReposts = true) 
     const resolvingUris = selectResolvingUris(state);
     const claimsByUri = selectClaimsByUri(state);
     const urisToResolve = normalizedUris.filter(uri => {
-
       if (resolvingUris.includes(uri)) {
         return false;
       }
@@ -3941,7 +3940,7 @@ function doFetchCollectionListMine(page = 1, pageSize = 99999, resolve = true) {
       });
     };
 
-    lbryProxy.collection_list({ page, page_size: pageSize }).then(callback, failure);
+    lbryProxy.collection_list({ page, page_size: pageSize, resolve }).then(callback, failure);
   };
 }
 
@@ -5799,8 +5798,6 @@ reducers[CLAIM_SEARCH_COMPLETED] = (state, action) => {
   }));
 };
 
-// COLLECTION_RESOLVE_COMPLETED: ...handleClaimAction(state, action)
-
 reducers[CLAIM_SEARCH_FAILED] = (state, action) => {
   const { query } = action.data;
   const claimSearchByQuery = Object.assign({}, state.claimSearchByQuery);
@@ -6784,14 +6781,20 @@ const getTimestamp = () => {
 const defaultState$6 = {
   builtin: {
     watchlater: {
-      items: [{ url: 'lbry://@seriously#5/seriouspublish#c', claimId: 'c1b740eb88f96b465f65e5f1542564539df1c62e' }],
+      items: [{
+        url: 'lbry://@seriously#5/seriouspublish#c',
+        claimId: 'c1b740eb88f96b465f65e5f1542564539df1c62e'
+      }],
       id: 'watchlater',
       name: 'Watch Later',
       updatedAt: getTimestamp(),
       type: 'stream'
     },
     favorites: {
-      items: [{ url: 'lbry://@seriously#5/seriouspublish#c', claimId: 'c1b740eb88f96b465f65e5f1542564539df1c62e' }],
+      items: [{
+        url: 'lbry://@seriously#5/seriouspublish#c',
+        claimId: 'c1b740eb88f96b465f65e5f1542564539df1c62e'
+      }],
       id: 'favoritestreams',
       name: 'Favorites',
       type: 'stream',
@@ -6848,7 +6851,6 @@ const collectionsReducer = handleActions({
     });
   },
   [PLAYLIST_ERROR]: (state, action) => {
-
     return Object.assign({}, state, {
       error: action.data.message
     });
