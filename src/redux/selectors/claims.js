@@ -97,7 +97,7 @@ export const selectReflectingById = createSelector(
 export const makeSelectClaimForClaimId = (claimId: string) =>
   createSelector(
     selectClaimsById,
-    byId => byId[claimId] ? byId[claimId] : undefined,
+    byId => (byId[claimId] ? byId[claimId] : undefined)
   );
 
 export const makeSelectClaimForUri = (uri: string, returnRepost: boolean = true) =>
@@ -523,6 +523,11 @@ export const selectFetchingMyChannels = createSelector(
   state => state.fetchingMyChannels
 );
 
+export const selectFetchingMyCollections = createSelector(
+  selectState,
+  state => state.fetchingMyCollections
+);
+
 export const selectMyChannelClaims = createSelector(
   selectState,
   selectClaimsById,
@@ -548,6 +553,13 @@ export const selectMyChannelUrls = createSelector(
   selectMyChannelClaims,
   claims => (claims ? claims.map(claim => claim.canonical_url || claim.permanent_url) : undefined)
 );
+
+export const selectMyCollectionIds = createSelector(
+  selectState,
+  state => state.myCollectionClaims
+);
+
+// selectMyCollectionUrls
 
 export const selectResolvingUris = createSelector(
   selectState,
