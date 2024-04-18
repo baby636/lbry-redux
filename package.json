@@ -42,7 +42,7 @@
     "babel-core": "^6.26.0",
     "babel-eslint": "^8.0.3",
     "babel-loader": "^7.1.4",
-    "babel-plugin-module-resolver": "^3.0.0",
+    "babel-plugin-module-resolver": "^5.0.1",
     "babel-plugin-transform-flow-comments": "^6.17.0",
     "babel-preset-env": "^1.6.1",
     "babel-preset-stage-2": "^6.18.0",
